@@ -21,7 +21,6 @@ func startServer(name string, cmdStr string) {
 
 func main() {
 	var wg sync.WaitGroup
-
 	servers := map[string]string{
 		"WebSocket": "E:/go/rts/cmd/webSocket/main.go",
 		"STUN":      "E:/go/rts/cmd/stun/main.go",
