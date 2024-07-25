@@ -12,10 +12,10 @@ import (
 	"syscall"
 )
 
-func main() {
-	publicIP := flag.String("public-ip", "", "IP Address that TURN can be contacted by.")
+func HandleTURN() error {
+	publicIP := flag.String("public-ip", "0.0.0.0", "IP Address that TURN can be contacted by.")
 	port := flag.Int("port", 3478, "Listening port.")
-	users := flag.String("users", "", "List of username and password (e.g. \"user=pass,user=pass\")")
+	users := flag.String("users", "admin=admin123", "List of username and password (e.g. \"user=pass,user=pass\")")
 	realm := flag.String("realm", "pion.ly", "Realm (defaults to \"pion.ly\")")
 	flag.Parse()
 
@@ -25,16 +25,18 @@ func main() {
 		log.Fatalf("'users' is required")
 	}
 
-	// Create a UDP listener to pass into pion/turn
-	// pion/turn itself doesn't allocate any UDP sockets, but lets the user pass them in
-	// this allows us to add logging, storage or modify inbound/outbound traffic
+	//创建UDP侦听器以传递到pion/turn
+	//turn本身不分配任何UDP套接字，但允许用户传入它们
+	//这允许我们添加日志记录、存储或修改入站/出站流量
+	log.Println("TURN server started on", "0.0.0.0:"+strconv.Itoa(*port))
 	udpListener, err := net.ListenPacket("udp4", "0.0.0.0:"+strconv.Itoa(*port))
 	if err != nil {
 		log.Panicf("Failed to create TURN server listener: %s", err)
+		return err
 	}
 
-	// Cache -users flag for easy lookup later
-	// If passwords are stored they should be saved to your DB hashed using turn.GenerateAuthKey
+	//缓存-用户标记，便于以后查找
+	//如果存储了密码，则应使用turn将其保存到您的数据库中。生成AuthKey
 	usersMap := map[string][]byte{}
 	for _, kv := range regexp.MustCompile(`(\w+)=(\w+)`).FindAllStringSubmatch(*users, -1) {
 		usersMap[kv[1]] = turn.GenerateAuthKey(kv[1], *realm, kv[2])
@@ -42,9 +44,9 @@ func main() {
 
 	s, err := turn.NewServer(turn.ServerConfig{
 		Realm: *realm,
-		// Set AuthHandler callback
-		// This is called every time a user tries to authenticate with the TURN server
-		// Return the key for that user, or false when no user is found
+		//设置AuthHandler回调
+		//每当用户尝试向TURN服务器进行身份验证时，都会调用此函数
+		//返回该用户的密钥，如果找不到用户，则返回false
 		AuthHandler: func(username string, realm string, srcAddr net.Addr) ([]byte, bool) { // nolint: revive
 			if key, ok := usersMap[username]; ok {
 				return key, true
@@ -74,4 +76,5 @@ func main() {
 	if err = s.Close(); err != nil {
 		log.Panic(err)
 	}
+	return nil
 }
