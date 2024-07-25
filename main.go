@@ -1,39 +1,54 @@
 package main
 
 import (
+	"bms/cmd"
 	"log"
-	"os/exec"
+	"net"
+	"net/http"
 	"sync"
 )
 
-func startServer(name string, cmdStr string) {
-	cmd := exec.Command("go", "run", cmdStr)
-	err := cmd.Start()
-	if err != nil {
-		log.Fatalf("Failed to start %s: %v", name, err)
-	}
-	log.Printf("%s server started", name)
-	err = cmd.Wait()
-	if err != nil {
-		log.Fatalf("%s server stopped: %v", name, err)
-	}
-}
-
 func main() {
 	var wg sync.WaitGroup
-	servers := map[string]string{
-		"WebSocket": "E:/go/rts/cmd/webSocket/main.go",
-		"STUN":      "E:/go/rts/cmd/stun/main.go",
-		"TURN":      "E:/go/rts/cmd/turn/main.go",
-	}
+	wg.Add(3)
+	// Start STUN server
+	go func() {
+		defer wg.Done()
+		addr := "0.0.0.0:19302"
+		conn, err := net.ListenPacket("udp", addr)
+		if err != nil {
+			log.Fatal("Failed to set up STUN server:", err)
+		}
+		defer func(conn net.PacketConn) {
+			err := conn.Close()
+			if err != nil {
+				log.Fatal("Failed to set up STUN server:", err)
+			}
+		}(conn)
+		log.Println("STUN server started on", addr)
+		cmd.HandleSTUN(conn)
+	}()
 
-	for name, cmdStr := range servers {
-		wg.Add(1)
-		go func(name, cmdStr string) {
-			defer wg.Done()
-			startServer(name, cmdStr)
-		}(name, cmdStr)
-	}
+	// Start TURN server
+	go func() {
+		defer wg.Done()
+		// 假设你的 TURN 服务器在 cmd 包中有一个函数 HandleTURN
+		err := cmd.HandleTURN()
+		if err != nil {
+			log.Fatal("Failed to set up TURN server:", err)
+		}
+		log.Println("TURN server started on")
+	}()
+	// Start WebSocket server
+	go func() {
+		defer wg.Done()
+		http.HandleFunc("/ws", cmd.HandleWebSocket)
+		log.Println("WebSocket server started on :8488")
+		err := http.ListenAndServe(":8488", nil)
+		if err != nil {
+			log.Fatal("ListenAndServe:", err)
+		}
+	}()
 
 	wg.Wait()
 }
