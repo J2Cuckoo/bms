@@ -1,19 +1,23 @@
 package cmd
 
 import (
+	"crypto/sha1"
+	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"github.com/gorilla/websocket"
 	"log"
 	"net/http"
 	"sync"
+	"time"
 )
 
 // Message 消息结构体
 type Message struct {
-	Type     string `json:"type"`      // 消息类型: global, room, private
-	RoomID   string `json:"room_id"`   // 房间ID
-	ClientID string `json:"client_id"` // 客户端ID
-	Content  string `json:"content"`   // 消息内容
+	Type     string `json:"type"`     // 消息类型: global, room, private, join
+	RoomID   string `json:"roomId"`   // 房间ID
+	ClientID string `json:"clientId"` // 客户端ID
+	Content  string `json:"content"`  // 消息内容
 }
 
 // Room 房间结构体
@@ -32,15 +36,8 @@ var upgrade = websocket.Upgrader{
 	},
 }
 
-// 处理WebSocket连接
+// HandleWebSocket 处理WebSocket连接
 func HandleWebSocket(w http.ResponseWriter, r *http.Request) {
-	roomID := r.URL.Query().Get("room")
-	clientID := r.URL.Query().Get("client")
-	if roomID == "" || clientID == "" {
-		http.Error(w, "Room ID and Client ID are required", http.StatusBadRequest)
-		return
-	}
-
 	conn, err := upgrade.Upgrade(w, r, nil)
 	if err != nil {
 		log.Println("Failed to upgrade connection:", err)
@@ -49,28 +46,17 @@ func HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 	defer func(conn *websocket.Conn) {
 		err := conn.Close()
 		if err != nil {
-			log.Println("Failed to upgrade connection:", err)
+			log.Println("Failed to close connection:", err)
 		}
 	}(conn)
 
-	// 获取或创建房间
-	roomsLock.Lock()
-	room, ok := rooms[roomID]
-	if !ok {
-		room = &Room{
-			Clients:   make(map[*websocket.Conn]string),
-			Broadcast: make(chan Message),
-		}
-		rooms[roomID] = room
-		go room.run()
-	}
-	room.Clients[conn] = clientID
-	roomsLock.Unlock()
+	// 启动心跳机制
+	go pingClient(conn)
 
 	for {
 		_, message, err := conn.ReadMessage()
 		if err != nil {
-			log.Println("Read error:", err)
+			handleReadError(err)
 			break
 		}
 		var msg Message
@@ -78,33 +64,73 @@ func HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 			log.Println("Unmarshal error:", err)
 			continue
 		}
+		roomsLock.Lock()
 		switch msg.Type {
+		case "init":
+			clientID := generateClientID(msg.Content)
+			response := Message{Type: "init", ClientID: clientID}
+			responseBytes, _ := json.Marshal(response)
+			err = conn.WriteMessage(websocket.TextMessage, responseBytes)
+			if err != nil {
+				log.Println("Write error:", err)
+				return
+			}
+		case "join":
+			if msg.RoomID == "" {
+				log.Println("Join error: RoomID is required")
+				continue
+			}
+			room, ok := rooms[msg.RoomID]
+			if !ok {
+				room = &Room{
+					Clients:   make(map[*websocket.Conn]string),
+					Broadcast: make(chan Message),
+				}
+				rooms[msg.RoomID] = room
+				go room.run()
+			}
+			room.Clients[conn] = msg.ClientID
+			response := Message{Type: "join", Content: "join room successful"}
+			responseBytes, _ := json.Marshal(response)
+			err = conn.WriteMessage(websocket.TextMessage, responseBytes)
+			if err != nil {
+				log.Println("Write error:", err)
+				return
+			}
 		case "global":
-			for _, r := range rooms {
-				r.Broadcast <- msg
+			for _, room := range rooms {
+				room.Broadcast <- msg
 			}
 		case "room":
-			room.Broadcast <- msg
+			room, ok := rooms[msg.RoomID]
+			if ok {
+				room.Broadcast <- msg
+			}
 		case "private":
-			for client, id := range room.Clients {
-				if id == msg.ClientID {
-					if err := client.WriteMessage(websocket.TextMessage, message); err != nil {
-						log.Println("Write error:", err)
-						err := client.Close()
-						if err != nil {
-							return
+			for _, room := range rooms {
+				for client, id := range room.Clients {
+					if id == msg.ClientID {
+						if err := client.WriteMessage(websocket.TextMessage, message); err != nil {
+							log.Println("Write error:", err)
+							err := client.Close()
+							if err != nil {
+								return
+							}
+							delete(room.Clients, client)
 						}
-						delete(room.Clients, client)
 					}
 				}
 			}
 		}
+		roomsLock.Unlock()
 	}
 
 	roomsLock.Lock()
-	delete(room.Clients, conn)
-	if len(room.Clients) == 0 {
-		delete(rooms, roomID)
+	for roomID, room := range rooms {
+		delete(room.Clients, conn)
+		if len(room.Clients) == 0 {
+			delete(rooms, roomID)
+		}
 	}
 	roomsLock.Unlock()
 }
@@ -127,5 +153,45 @@ func (r *Room) run() {
 				delete(r.Clients, client)
 			}
 		}
+	}
+}
+
+// generateClientID 生成一个固定的7位数作为clientID
+func generateClientID(macAddress string) string {
+	hash := sha1.New()
+	hash.Write([]byte(macAddress))
+	hashBytes := hash.Sum(nil)
+	hashString := hex.EncodeToString(hashBytes)
+	var sum int
+	for _, c := range hashString {
+		sum += int(c)
+	}
+	return fmt.Sprintf("%07d", sum%10000000)
+}
+
+// pingClient 向客户端发送心跳包以保持连接活跃
+func pingClient(conn *websocket.Conn) {
+	ticker := time.NewTicker(30 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		<-ticker.C
+		if err := conn.WriteMessage(websocket.PingMessage, nil); err != nil {
+			log.Println("Ping error:", err)
+			err := conn.Close()
+			if err != nil {
+				return
+			}
+			break
+		}
+	}
+}
+
+// handleReadError 处理读消息时的错误
+func handleReadError(err error) {
+	if websocket.IsCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
+		log.Println("Client disconnected:", err)
+	} else {
+		log.Println("Read error:", err)
 	}
 }
