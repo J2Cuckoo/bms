@@ -14,10 +14,10 @@ import (
 
 // Message 消息结构体
 type Message struct {
-	Type     string `json:"type"`     // 消息类型: global, room, private, join
-	RoomID   string `json:"roomId"`   // 房间ID
-	ClientID string `json:"clientId"` // 客户端ID
-	Content  string `json:"content"`  // 消息内容
+	Type     string `json:"type,omitempty"`     // 消息类型: global, room, private, join
+	RoomID   string `json:"roomId,omitempty"`   // 房间ID
+	ClientID string `json:"clientId,omitempty"` // 客户端ID
+	Content  string `json:"content,omitempty"`  // 消息内容
 }
 
 // Room 房间结构体
@@ -90,8 +90,20 @@ func HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 				go room.run()
 			}
 			room.Clients[conn] = msg.ClientID
-			response := Message{Type: "join", Content: "join room successful"}
-			responseBytes, _ := json.Marshal(response)
+
+			// 获取当前房间中所有客户端的ID
+			clientIDs := []string{}
+			for _, id := range room.Clients {
+				clientIDs = append(clientIDs, id)
+			}
+
+			response := map[string]interface{}{
+				"type":      "join",
+				"content":   "join room successful",
+				"clientIds": clientIDs,
+			}
+			filteredResponse := filterEmptyFields(response)
+			responseBytes, _ := json.Marshal(filteredResponse)
 			err = conn.WriteMessage(websocket.TextMessage, responseBytes)
 			if err != nil {
 				log.Println("Write error:", err)
@@ -194,4 +206,24 @@ func handleReadError(err error) {
 	} else {
 		log.Println("Read error:", err)
 	}
+}
+
+// filterEmptyFields 过滤掉值为空字符串的字段
+func filterEmptyFields(data map[string]interface{}) map[string]interface{} {
+	filtered := make(map[string]interface{})
+	for key, value := range data {
+		switch v := value.(type) {
+		case string:
+			if v != "" {
+				filtered[key] = value
+			}
+		case []interface{}:
+			if len(v) > 0 {
+				filtered[key] = value
+			}
+		default:
+			filtered[key] = value
+		}
+	}
+	return filtered
 }
