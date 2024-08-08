@@ -1,12 +1,13 @@
 package cmd
 
 import (
-	"crypto/sha1"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"github.com/gorilla/websocket"
+	"github.com/tjfoc/gmsm/sm3"
 	"log"
+	"math/big"
 	"net/http"
 	"sync"
 	"time"
@@ -92,7 +93,7 @@ func HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 			room.Clients[conn] = msg.ClientID
 
 			// 获取当前房间中所有客户端的ID
-			clientIDs := []string{}
+			var clientIDs []string
 			for _, id := range room.Clients {
 				clientIDs = append(clientIDs, id)
 			}
@@ -170,15 +171,23 @@ func (r *Room) run() {
 
 // generateClientID 生成一个固定的7位数作为clientID
 func generateClientID(macAddress string) string {
-	hash := sha1.New()
-	hash.Write([]byte(macAddress))
-	hashBytes := hash.Sum(nil)
-	hashString := hex.EncodeToString(hashBytes)
-	var sum int
-	for _, c := range hashString {
-		sum += int(c)
+	counter := 0
+	for {
+		hash := sm3.New()
+		// 将macAddress和counter组合在一起
+		hash.Write([]byte(fmt.Sprintf("%s%d", macAddress, counter)))
+		hashBytes := hash.Sum(nil)
+		hashString := hex.EncodeToString(hashBytes)
+		// 将hashString的前几位转换为数字
+		num := new(big.Int)
+		num.SetString(hashString[:16], 16) // 选择16个字符作为样本，可以根据需要调整
+
+		clientID := fmt.Sprintf("%09d", num.Uint64()%1000000000)
+		if clientID[0] != '0' {
+			return clientID
+		}
+		counter++
 	}
-	return fmt.Sprintf("%07d", sum%10000000)
 }
 
 // pingClient 向客户端发送心跳包以保持连接活跃
