@@ -15,10 +15,10 @@ import (
 
 // Message 消息结构体
 type Message struct {
-	Type     string `json:"type,omitempty"`     // 消息类型: global, room, private, join
-	RoomID   string `json:"roomId,omitempty"`   // 房间ID
-	ClientID string `json:"clientId,omitempty"` // 客户端ID
-	Content  string `json:"content,omitempty"`  // 消息内容
+	Type     string      `json:"type,omitempty"`     // 消息类型: global, room, private, join, init
+	RoomID   string      `json:"roomId,omitempty"`   // 房间ID
+	ClientID string      `json:"clientId,omitempty"` // 客户端ID
+	Content  interface{} `json:"content,omitempty"`  // 消息内容，支持任意类型
 }
 
 // Room 房间结构体
@@ -30,6 +30,10 @@ type Room struct {
 // 全局房间管理
 var rooms = make(map[string]*Room)
 var roomsLock sync.Mutex
+
+// 全局的客户端ID列表
+var clientIDs []string
+var clientIDsLock sync.Mutex
 
 var upgrade = websocket.Upgrader{
 	CheckOrigin: func(r *http.Request) bool {
@@ -66,19 +70,38 @@ func HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		roomsLock.Lock()
+		clientIDsLock.Lock()
 		switch msg.Type {
 		case "init":
-			clientID := generateClientID(msg.Content)
+			clientID := generateClientID(msg.Content.(string))
+			clientIDs = append(clientIDs, clientID)
+			// 检查是否存在 "global" 房间，如果不存在则创建
+			globalRoom, ok := rooms["global"]
+			if !ok {
+				globalRoom = &Room{
+					Clients:   make(map[*websocket.Conn]string),
+					Broadcast: make(chan Message),
+				}
+				rooms["global"] = globalRoom
+				go globalRoom.run()
+			}
+			// 将客户端加入 "global" 房间
+			globalRoom.Clients[conn] = clientID
+			// 生成响应消息
 			response := Message{Type: "init", ClientID: clientID}
 			responseBytes, _ := json.Marshal(response)
 			err = conn.WriteMessage(websocket.TextMessage, responseBytes)
 			if err != nil {
 				log.Println("Write error:", err)
+				roomsLock.Unlock()
+				clientIDsLock.Unlock()
 				return
 			}
 		case "join":
 			if msg.RoomID == "" {
 				log.Println("Join error: RoomID is required")
+				roomsLock.Unlock()
+				clientIDsLock.Unlock()
 				continue
 			}
 			room, ok := rooms[msg.RoomID]
@@ -91,13 +114,7 @@ func HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 				go room.run()
 			}
 			room.Clients[conn] = msg.ClientID
-
 			// 获取当前房间中所有客户端的ID
-			var clientIDs []string
-			for _, id := range room.Clients {
-				clientIDs = append(clientIDs, id)
-			}
-
 			response := map[string]interface{}{
 				"type":      "join",
 				"content":   "join room successful",
@@ -108,17 +125,76 @@ func HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 			err = conn.WriteMessage(websocket.TextMessage, responseBytes)
 			if err != nil {
 				log.Println("Write error:", err)
+				roomsLock.Unlock()
+				clientIDsLock.Unlock()
 				return
 			}
 		case "global":
-			for _, room := range rooms {
-				room.Broadcast <- msg
+			// 获取 "global" 房间
+			globalRoom, ok := rooms["global"]
+			// 获取发送者的 clientID
+			senderClientID := ""
+			for client, id := range globalRoom.Clients {
+				if client == conn {
+					senderClientID = id
+					break
+				}
+			}
+
+			if senderClientID == "" {
+				log.Println("Sender clientID not found")
+				roomsLock.Unlock()
+				clientIDsLock.Unlock()
+				return
+			}
+
+			if ok {
+				log.Println("Processing global room messages")
+				for client := range globalRoom.Clients {
+					log.Println("Connection in the global room:", client)
+					// 只发送给除发送者外的其他连接
+					if globalRoom.Clients[client] != senderClientID {
+						err := client.WriteMessage(websocket.TextMessage, message)
+						if err != nil {
+							log.Println("Write error:", err)
+							err := client.Close()
+							if err != nil {
+								roomsLock.Unlock()
+								clientIDsLock.Unlock()
+								return
+							}
+							delete(globalRoom.Clients, client)
+						}
+					}
+				}
+			} else {
+				log.Println("Global room not found")
 			}
 		case "room":
 			room, ok := rooms[msg.RoomID]
 			if ok {
-				room.Broadcast <- msg
+				for client, id := range room.Clients {
+					senderClientID := ""
+					if client == conn {
+						senderClientID = id
+						break
+					}
+					if room.Clients[client] != senderClientID {
+						err := client.WriteMessage(websocket.TextMessage, message)
+						if err != nil {
+							log.Println("Write error:", err)
+							err := client.Close()
+							if err != nil {
+								roomsLock.Unlock()
+								clientIDsLock.Unlock()
+								return
+							}
+							delete(room.Clients, client)
+						}
+					}
+				}
 			}
+
 		case "private":
 			for _, room := range rooms {
 				for client, id := range room.Clients {
@@ -127,6 +203,8 @@ func HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 							log.Println("Write error:", err)
 							err := client.Close()
 							if err != nil {
+								roomsLock.Unlock()
+								clientIDsLock.Unlock()
 								return
 							}
 							delete(room.Clients, client)
@@ -135,16 +213,19 @@ func HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 		}
+		clientIDsLock.Unlock()
 		roomsLock.Unlock()
 	}
 
 	roomsLock.Lock()
+	clientIDsLock.Unlock()
 	for roomID, room := range rooms {
 		delete(room.Clients, conn)
 		if len(room.Clients) == 0 {
 			delete(rooms, roomID)
 		}
 	}
+	clientIDsLock.Unlock()
 	roomsLock.Unlock()
 }
 
