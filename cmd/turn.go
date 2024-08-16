@@ -13,7 +13,7 @@ import (
 )
 
 func HandleTURN() error {
-	publicIP := flag.String("public-ip", "0.0.0.0", "IP Address that TURN can be contacted by.")
+	publicIP := flag.String("public-ip", "159.75.106.201", "IP Address that TURN can be contacted by.")
 	port := flag.Int("port", 3478, "Listening port.")
 	users := flag.String("users", "admin=admin123", "List of username and password (e.g. \"user=pass,user=pass\")")
 	realm := flag.String("realm", "pion.ly", "Realm (defaults to \"pion.ly\")")
