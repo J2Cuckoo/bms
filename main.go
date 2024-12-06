@@ -14,7 +14,7 @@ func main() {
 	// Start STUN server
 	go func() {
 		defer wg.Done()
-		addr := "0.0.0.0:19302"
+		addr := "0.0.0.0:3478"
 		conn, err := net.ListenPacket("udp", addr)
 		if err != nil {
 			log.Fatal("Failed to set up STUN server:", err)
